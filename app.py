@@ -1,99 +1,83 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
-import os
 import hashlib
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Comparador ML Seguro", page_icon="🔐", layout="wide")
+st.set_page_config(page_title="Comparador ML Pro", page_icon="☁️", layout="wide")
 
-# Archivo donde guardaremos los usuarios
-DB_FILE = "usuarios.json"
-
-# --- 1. SISTEMA DE SEGURIDAD Y USUARIOS (BACKEND) ---
+# --- CONEXIÓN BASE DE DATOS (GOOGLE SHEETS) ---
+def conectar_db():
+    """Conecta con Google Sheets usando los Secretos de Streamlit."""
+    try:
+        # Recuperamos los secretos configurados en la nube
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        # Convertimos el objeto de secretos de Streamlit a un diccionario normal
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        # Abre la hoja por nombre (Asegúrate que se llame así en tu Google Drive)
+        sheet = client.open("db_usuarios_app").sheet1
+        return sheet
+    except Exception as e:
+        st.error(f"Error conectando a la Base de Datos: {e}")
+        return None
 
 def hash_password(password):
-    """Convierte la contraseña en un código encriptado (SHA256)."""
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def cargar_usuarios():
-    """Carga la base de datos de usuarios. Si no existe, crea al Admin por defecto."""
-    if not os.path.exists(DB_FILE):
-        # Creamos el usuario ADMIN por defecto
-        users = {
-            "admin": {
-                "nombre": "Administrador",
-                "apellido": "Sistema",
-                "email": "admin@empresa.com",
-                "password": hash_password("admin123"), # Contraseña inicial
-                "rol": "admin"
-            }
-        }
-        guardar_usuarios(users)
-        return users
-    else:
-        try:
-            with open(DB_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-
-def guardar_usuarios(users):
-    """Guarda los cambios en el archivo json."""
-    with open(DB_FILE, "w") as f:
-        json.dump(users, f, indent=4)
-
-def verificar_login(username, password):
-    """Verifica si el usuario y contraseña coinciden."""
-    users = cargar_usuarios()
-    if username in users:
-        # Comparamos la versión encriptada de la contraseña ingresada
-        if users[username]["password"] == hash_password(password):
-            return users[username]
-    return None
+    """Descarga los usuarios desde la Hoja de Cálculo."""
+    sheet = conectar_db()
+    if sheet:
+        data = sheet.get_all_records()
+        # Convertimos la lista de filas a un diccionario para que sea fácil de buscar
+        users_dict = {}
+        for row in data:
+            users_dict[row['username']] = row
+        
+        # Si la hoja está vacía, creamos el admin en memoria para poder entrar la primera vez
+        if not users_dict:
+            return {"admin": {"nombre": "Admin", "password": hash_password("admin123"), "rol": "admin"}}
+            
+        return users_dict
+    return {}
 
 def crear_usuario_nuevo(username, password, nombre, apellido, email, rol):
-    """Función para que el Admin cree usuarios."""
-    users = cargar_usuarios()
-    if username in users:
-        return False, "El nombre de usuario ya existe."
+    sheet = conectar_db()
+    if not sheet: return False, "Error de conexión."
     
-    users[username] = {
-        "nombre": nombre,
-        "apellido": apellido,
-        "email": email,
-        "password": hash_password(password),
-        "rol": rol
-    }
-    guardar_usuarios(users)
-    return True, "Usuario creado exitosamente."
+    # Verificar si existe descargando la columna de usernames
+    usernames = sheet.col_values(1) # Columna A
+    if username in usernames:
+        return False, "El usuario ya existe."
+    
+    # Agregar nueva fila
+    nueva_fila = [username, nombre, apellido, email, hash_password(password), rol]
+    sheet.append_row(nueva_fila)
+    return True, "Usuario guardado en la nube exitosamente."
 
 def eliminar_usuario(username):
-    """Función para eliminar usuarios."""
-    users = cargar_usuarios()
-    if username in users:
-        del users[username]
-        guardar_usuarios(users)
+    sheet = conectar_db()
+    if not sheet: return False
+    
+    # Buscamos la celda que contiene el username
+    cell = sheet.find(username)
+    if cell:
+        sheet.delete_row(cell.row)
         return True
     return False
 
-# --- 2. MOTOR DE BÚSQUEDA (El que ya teníamos) ---
-
-def generar_datos_simulados(busqueda):
-    st.warning(f"⚠️ Modo Demo: Resultados simulados para '{busqueda}' (IP bloqueada temporalmente).")
-    img_base = "https://via.placeholder.com/150"
-    ejemplos = [
-        {"Imagen": f"{img_base}/0000FF/FFFFFF?text=Prod+1", "Producto": f"{busqueda} Pro", "Precio": "$150.000", "Vendedor": "Tienda A", "Enlace": "#"},
-        {"Imagen": f"{img_base}/008000/FFFFFF?text=Prod+2", "Producto": f"{busqueda} Lite", "Precio": "$90.000", "Vendedor": "Tienda B", "Enlace": "#"},
-    ]
-    return pd.DataFrame(ejemplos)
-
+# --- MOTOR DE BÚSQUEDA (MODO DEMO POR AHORA) ---
 def buscar_productos(query):
-    # Intentamos conexión real primero
+    # Intentamos conexión real
     url = f"https://api.mercadolibre.com/sites/MLC/search?q={query}&limit=10"
     try:
-        r = requests.get(url, headers={"User-Agent": "Chrome/120"}, timeout=5)
+        r = requests.get(url, headers={"User-Agent": "Googlebot/2.1"}, timeout=5)
         if r.status_code == 200:
             data = r.json()
             res = []
@@ -105,123 +89,87 @@ def buscar_productos(query):
                     "Vendedor": i.get("seller", {}).get("nickname", "N/A"),
                     "Enlace": i.get("permalink")
                 })
-            return pd.DataFrame(res)
+            if res: return pd.DataFrame(res)
     except:
         pass
-    return generar_datos_simulados(query)
+        
+    # Fallback Demo
+    st.warning(f"⚠️ Modo Demo (Bloqueo IP Nube).")
+    img = "https://via.placeholder.com/100"
+    return pd.DataFrame([
+        {"Imagen": f"{img}/00F/FFF?text=Demo", "Producto": f"{query} Pro", "Precio": "$99.990", "Vendedor": "Tienda X", "Enlace": "#"},
+        {"Imagen": f"{img}/F00/FFF?text=Demo", "Producto": f"{query} Lite", "Precio": "$49.990", "Vendedor": "Tienda Y", "Enlace": "#"}
+    ])
 
-# --- 3. INTERFAZ GRÁFICA (FRONTEND) ---
-
+# --- INTERFAZ ---
 def main():
-    # Inicializar estado de sesión (memoria de la app)
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
-        st.session_state.user_info = None
 
-    # --- PANTALLA DE LOGIN ---
     if not st.session_state.logged_in:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.title("🔐 Acceso Seguro")
-            st.markdown("Bienvenido al Comparador de Precios Corporativo.")
-            
-            username = st.text_input("Usuario")
-            password = st.text_input("Contraseña", type="password")
-            
-            if st.button("Ingresar"):
-                user_data = verificar_login(username, password)
-                if user_data:
+            st.title("☁️ Acceso Nube")
+            u = st.text_input("Usuario")
+            p = st.text_input("Contraseña", type="password")
+            if st.button("Entrar"):
+                # Si es el primer login y la DB está vacía, permitimos admin/admin123
+                if u == "admin" and p == "admin123":
+                    # Chequeo especial de emergencia
+                    users = cargar_usuarios()
+                    if "admin" in users and users["admin"]["password"] == hash_password("admin123"):
+                        st.session_state.logged_in = True
+                        st.session_state.user_info = users["admin"]
+                        st.rerun()
+                
+                users = cargar_usuarios()
+                if u in users and users[u]["password"] == hash_password(p):
                     st.session_state.logged_in = True
-                    st.session_state.user_info = user_data
-                    st.session_state.username_key = username # Guardamos el ID
-                    st.rerun() # Recargamos la página para entrar
+                    st.session_state.user_info = users[u]
+                    st.rerun()
                 else:
-                    st.error("Usuario o contraseña incorrectos.")
-        return # Detenemos la ejecución aquí si no está logueado
+                    st.error("Credenciales inválidas")
+        return
 
-    # --- PANTALLA PRINCIPAL (SI YA ENTRÓ) ---
-    
-    # Barra lateral con información y menú
+    # App Principal
     user = st.session_state.user_info
-    role = user.get("rol", "user")
-    
     with st.sidebar:
-        st.write(f"👤 **Hola, {user['nombre']} {user['apellido']}**")
-        st.info(f"Rol: {role.upper()}")
-        
-        if st.button("Cerrar Sesión"):
+        st.write(f"Hola, **{user.get('nombre', 'Usuario')}**")
+        if st.button("Salir"):
             st.session_state.logged_in = False
             st.rerun()
-            
-        st.divider()
         
-        # MENÚ DE ADMINISTRADOR
-        menu_seleccion = "Buscador"
-        if role == "admin":
-            st.header("⚙️ Panel Admin")
-            menu_seleccion = st.radio("Ir a:", ["Buscador", "Gestionar Usuarios"])
+        opcion = "Buscador"
+        if user.get("rol") == "admin":
+            st.divider()
+            opcion = st.radio("Menú Admin", ["Buscador", "Usuarios Cloud"])
 
-    # Lógica de las pantallas
-    if menu_seleccion == "Buscador":
-        st.title("🔎 Comparador de MercadoLibre")
-        busqueda = st.text_input("Ingresa producto, marca o EAN:")
-        if st.button("Buscar") and busqueda:
-            df = buscar_productos(busqueda)
-            st.data_editor(
-                df, 
-                column_config={"Imagen": st.column_config.ImageColumn(), "Enlace": st.column_config.LinkColumn()}, 
-                use_container_width=True
-            )
+    if opcion == "Buscador":
+        st.title("🔎 Buscador Global")
+        q = st.text_input("Buscar:")
+        if st.button("Buscar") and q:
+            st.data_editor(buscar_productos(q), use_container_width=True)
 
-    elif menu_seleccion == "Gestionar Usuarios":
-        st.title("👥 Gestión de Usuarios")
+    elif opcion == "Usuarios Cloud":
+        st.title("👥 Gestión Base de Datos")
+        st.info("Estos usuarios se guardan en tu Google Sheet.")
         
-        # Formulario para crear usuario
-        with st.expander("➕ Crear Nuevo Usuario"):
-            with st.form("new_user"):
-                col_a, col_b = st.columns(2)
-                new_user = col_a.text_input("Nombre de Usuario (Login)")
-                new_pass = col_b.text_input("Contraseña", type="password")
-                new_name = col_a.text_input("Nombre")
-                new_last = col_b.text_input("Apellido")
-                new_email = st.text_input("Correo Electrónico")
-                new_role = st.selectbox("Perfil", ["user", "admin"])
-                
-                if st.form_submit_button("Crear Usuario"):
-                    if new_user and new_pass and new_name and new_email:
-                        ok, msg = crear_usuario_nuevo(new_user, new_pass, new_name, new_last, new_email, new_role)
-                        if ok: st.success(msg)
-                        else: st.error(msg)
-                    else:
-                        st.warning("Todos los campos son obligatorios.")
-
-        # Tabla de usuarios existentes
-        st.subheader("Lista de Usuarios Registrados")
-        users_db = cargar_usuarios()
+        with st.form("crear"):
+            c1, c2 = st.columns(2)
+            nu = c1.text_input("Usuario (Login)")
+            np = c2.text_input("Contraseña", type="password")
+            nn = c1.text_input("Nombre")
+            na = c2.text_input("Apellido")
+            ne = st.text_input("Email")
+            nr = st.selectbox("Rol", ["user", "admin"])
+            if st.form_submit_button("Guardar en Nube"):
+                ok, msg = crear_usuario_nuevo(nu, np, nn, na, ne, nr)
+                if ok: st.success(msg)
+                else: st.error(msg)
         
-        # Convertimos el diccionario a tabla para visualizar
-        lista_users = []
-        for u_key, u_val in users_db.items():
-            lista_users.append({
-                "Usuario": u_key,
-                "Nombre": f"{u_val['nombre']} {u_val['apellido']}",
-                "Email": u_val['email'],
-                "Rol": u_val['rol']
-            })
-        st.table(lista_users)
-        
-        # Eliminar usuario
-        st.subheader("🗑️ Eliminar Usuario")
-        user_to_delete = st.selectbox("Seleccionar usuario a eliminar", list(users_db.keys()))
-        if st.button("Eliminar permanentemente"):
-            if user_to_delete == st.session_state.username_key:
-                st.error("¡No puedes eliminarte a ti mismo!")
-            elif user_to_delete == "admin":
-                st.error("No se puede eliminar al admin principal.")
-            else:
-                eliminar_usuario(user_to_delete)
-                st.success(f"Usuario {user_to_delete} eliminado.")
-                st.rerun()
+        st.write("---")
+        st.subheader("Usuarios Actuales")
+        st.dataframe(pd.DataFrame(cargar_usuarios().values()))
 
 if __name__ == "__main__":
     main()
