@@ -53,29 +53,26 @@ def crear_usuario_nuevo(username, password, nombre, apellido, email, rol):
     except Exception as e:
         return False, f"Error: {e}"
 
-# --- 2. MOTOR DE BÚSQUEDA (MODO NAVEGADOR) ---
-# Esta versión NO usa el Token que da error 403.
-# Simula ser un navegador real para ver precios públicos.
+# --- 2. MOTOR DE BÚSQUEDA (CAMUFLAJE AVANZADO) ---
 
 def buscar_productos(query):
     url = "https://api.mercadolibre.com/sites/MLC/search"
     params = {'q': query, 'limit': 20}
     
-    # Rotación de identidades (User-Agents) para evitar bloqueos
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    ]
-    
-    # Elegimos uno al azar
+    # CAMUFLAJE: Simulamos ser un usuario real en Chile navegando desde Chrome
     headers = {
-        'User-Agent': random.choice(user_agents),
-        'Accept': 'application/json'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8',
+        'Referer': 'https://www.mercadolibre.cl/',
+        'Origin': 'https://www.mercadolibre.cl',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site'
     }
     
     try:
-        # Hacemos la petición SIN token (Anónima)
         r = requests.get(url, headers=headers, params=params)
         
         if r.status_code == 200:
@@ -86,7 +83,6 @@ def buscar_productos(query):
                     precio = item.get("price")
                     original = item.get("original_price")
                     oferta = "SÍ" if original and precio < original else "NO"
-                    # Mejoramos la calidad de la imagen (de I a O)
                     foto = item.get("thumbnail", "").replace("http://", "https://").replace("-I.jpg", "-O.jpg")
                     
                     resultados.append({
@@ -98,9 +94,12 @@ def buscar_productos(query):
                         "Enlace": item.get("permalink")
                     })
             return pd.DataFrame(resultados)
+            
+        elif r.status_code == 403:
+             st.error("🔒 Bloqueo de seguridad de MercadoLibre (IP Cloud). Intenta más tarde.")
+             return pd.DataFrame()
         else:
-            # Si falla, mostramos el código para entender qué pasó
-            st.error(f"Error de conexión ({r.status_code})")
+            st.error(f"Error desconocido ({r.status_code})")
             return pd.DataFrame()
             
     except Exception as e:
@@ -113,7 +112,6 @@ def main():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
 
-    # Login
     if not st.session_state.logged_in:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -121,13 +119,11 @@ def main():
             u = st.text_input("Usuario")
             p = st.text_input("Pass", type="password")
             if st.button("Entrar"):
-                # Backdoor Admin
                 if u.strip() == "admin" and p.strip() == "admin123":
                     st.session_state.logged_in = True
                     st.session_state.user_info = {"nombre": "Admin", "rol": "admin"}
                     st.rerun()
                 
-                # Login Real
                 users = cargar_usuarios()
                 u_cl = u.strip()
                 if u_cl in users and users[u_cl]["password"] == hash_password(p):
@@ -138,7 +134,6 @@ def main():
                     st.error("Error de acceso")
         return
 
-    # App Principal
     user = st.session_state.user_info
     with st.sidebar:
         st.write(f"Hola, **{user.get('nombre', 'Admin')}**")
@@ -155,7 +150,7 @@ def main():
         st.title("🔎 Buscador ML")
         q = st.text_input("Producto:")
         if st.button("Buscar") and q:
-            with st.spinner("Buscando mejores precios..."):
+            with st.spinner("Buscando..."):
                 df = buscar_productos(q)
                 if not df.empty:
                     st.data_editor(
@@ -168,7 +163,9 @@ def main():
                         use_container_width=True
                     )
                 else:
-                    st.warning("No se encontraron resultados o hubo un bloqueo temporal.")
+                    # Si falla, mostramos un mensaje amigable
+                    if not st.session_state.get("error_shown"):
+                        st.warning("No se encontraron resultados.")
 
     elif menu == "Usuarios":
         st.title("👥 Usuarios")
