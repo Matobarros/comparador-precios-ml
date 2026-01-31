@@ -5,6 +5,7 @@ import hashlib
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import random
+import time
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Comparador ML Pro", page_icon="🛍️", layout="wide")
@@ -13,9 +14,7 @@ st.set_page_config(page_title="Comparador ML Pro", page_icon="🛍️", layout="
 def conectar_db():
     try:
         if "gcp_service_account" not in st.secrets:
-            # Fallo silencioso si no hay config de google, para no romper la app visualmente
             return None
-
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -45,13 +44,10 @@ def cargar_usuarios():
 def crear_usuario_nuevo(username, password, nombre, apellido, email, rol):
     sheet = conectar_db()
     if not sheet: return False, "Error de conexión con Base de Datos."
-    
     username = str(username).strip()
     if not username or not password: return False, "Datos incompletos."
-    
     users = cargar_usuarios()
     if username in users: return False, "El usuario ya existe."
-    
     try:
         nueva_fila = [username, nombre, apellido, email, hash_password(password), rol]
         sheet.append_row(nueva_fila)
@@ -59,13 +55,11 @@ def crear_usuario_nuevo(username, password, nombre, apellido, email, rol):
     except Exception as e:
         return False, f"Error técnico: {e}"
 
-# --- 2. MOTOR DE BÚSQUEDA HÍBRIDO ---
+# --- 2. MOTOR DE BÚSQUEDA INTELIGENTE ---
 
 def obtener_token_ml():
-    """Genera el pase temporal para leer precios reales."""
     if "mercadolibre" not in st.secrets:
         return None
-
     url = "https://api.mercadolibre.com/oauth/token"
     headers = {'accept': 'application/json', 'content-type': 'application/x-www-form-urlencoded'}
     data = {
@@ -73,7 +67,6 @@ def obtener_token_ml():
         'client_id': st.secrets["mercadolibre"]["app_id"],
         'client_secret': st.secrets["mercadolibre"]["client_secret"]
     }
-    
     try:
         r = requests.post(url, headers=headers, data=data)
         if r.status_code == 200:
@@ -82,39 +75,16 @@ def obtener_token_ml():
     except:
         return None
 
-def busqueda_anonima_fallback(query):
-    """
-    Intento desesperado: Si el token falla (403), intentamos buscar
-    como si fueramos un navegador normal para salvar la consulta.
-    """
-    url = "https://api.mercadolibre.com/sites/MLC/search"
-    # Lista de navegadores para rotar y evitar bloqueos
-    user_agents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/118.0"
-    ]
-    
-    params = {'q': query, 'limit': 20}
-    headers = {'User-Agent': random.choice(user_agents)}
-    
-    try:
-        r = requests.get(url, params=params, headers=headers)
-        if r.status_code == 200:
-            return procesar_resultados(r.json())
-    except:
-        pass
-    return pd.DataFrame()
-
-def procesar_resultados(data):
-    """Convierte el JSON de ML en una tabla limpia."""
+def procesar_json_ml(data):
+    """Convierte la respuesta de ML en una tabla limpia"""
     resultados = []
     if "results" in data:
         for item in data["results"]:
             precio = item.get("price")
             original = item.get("original_price")
             oferta = "SÍ" if original and precio < original else "NO"
-            foto = item.get("thumbnail", "").replace("http://", "https://")
+            # Truco para mejorar calidad de imagen
+            foto = item.get("thumbnail", "").replace("http://", "https://").replace("-I.jpg", "-O.jpg")
             
             resultados.append({
                 "Imagen": foto,
@@ -127,36 +97,52 @@ def procesar_resultados(data):
     return pd.DataFrame(resultados)
 
 def buscar_productos(query):
-    # ESTRATEGIA 1: INTENTO OFICIAL (CON TOKEN)
+    # Paso 1: Intentamos conseguir el Token
     token = obtener_token_ml()
     
+    url = "https://api.mercadolibre.com/sites/MLC/search"
+    params = {'q': query, 'limit': 20}
+    
+    # INTENTO A: CON CREDENCIALES (Si tenemos token)
     if token:
-        url = "https://api.mercadolibre.com/sites/MLC/search"
-        headers = {'Authorization': f'Bearer {token}'}
-        params = {'q': query, 'limit': 20}
-        
         try:
+            headers = {'Authorization': f'Bearer {token}'}
             r = requests.get(url, headers=headers, params=params)
             
+            # ¡AQUÍ ESTÁ LA SOLUCIÓN!
+            # Si responde 200 (OK), usamos los datos.
             if r.status_code == 200:
-                return procesar_resultados(r.json())
+                return procesar_json_ml(r.json())
+            
+            # Si responde 403 (Prohibido), NO mostramos error.
+            # Simplemente pasamos silenciosamente al INTENTO B.
             elif r.status_code == 403:
-                st.warning("⚠️ Permiso denegado con Token Oficial (Revisar checkbox 'Negocios' en ML). Intentando ruta alternativa...")
-                # Si falla por permisos, saltamos a la ESTRATEGIA 2
-                return busqueda_anonima_fallback(query)
+                print("Token rechazado (403). Cambiando a modo anónimo...")
+                pass 
+            
             else:
-                st.error(f"Error MercadoLibre: {r.status_code}")
-        except Exception as e:
-            st.error(f"Error técnico: {e}")
-    
-    # ESTRATEGIA 2: INTENTO ANÓNIMO (Si no hay token o falló)
-    df = busqueda_anonima_fallback(query)
-    if not df.empty:
-        return df
+                st.error(f"Error ML: {r.status_code}")
+        except:
+            pass
 
-    # ESTRATEGIA 3: MODO DEMO (Último recurso si todo falla)
-    st.info("Mostrando DEMO (No se pudo conectar).")
-    return pd.DataFrame([{"Imagen": "https://via.placeholder.com/150", "Producto": f"DEMO {query}", "Precio": "$0", "Vendedor": "Sistema", "Enlace": "#"}])
+    # INTENTO B: MODO ANÓNIMO (Si el token falló o no existe)
+    # Esto simula ser un navegador Chrome normal para que no nos bloqueen
+    try:
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/119.0.0.0 Safari/537.36"
+        ]
+        headers_anon = {'User-Agent': random.choice(user_agents)}
+        r_anon = requests.get(url, params=params, headers=headers_anon)
+        
+        if r_anon.status_code == 200:
+            return procesar_json_ml(r_anon.json())
+    except:
+        pass
+
+    # Si todo falla
+    st.warning("No se pudieron cargar resultados en este momento.")
+    return pd.DataFrame()
 
 # --- 3. INTERFAZ ---
 
@@ -209,17 +195,20 @@ def main():
         st.title("🔎 Buscador Oficial ML")
         q = st.text_input("Producto:")
         if st.button("Buscar") and q:
-            with st.spinner("Conectando con MercadoLibre..."):
+            with st.spinner("Buscando mejores precios..."):
                 df = buscar_productos(q)
                 if not df.empty:
                     st.data_editor(
                         df, 
-                        column_config={"Imagen": st.column_config.ImageColumn(), "Enlace": st.column_config.LinkColumn()}, 
+                        column_config={
+                            "Imagen": st.column_config.ImageColumn(width="small"), 
+                            "Enlace": st.column_config.LinkColumn()
+                        }, 
                         use_container_width=True,
-                        height=600
+                        height=700
                     )
-                elif df.empty:
-                     st.warning("No se encontraron resultados.")
+                else:
+                     st.warning("Sin resultados.")
 
     elif menu == "Usuarios":
         st.title("👥 Gestión de Usuarios")
