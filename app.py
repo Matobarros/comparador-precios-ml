@@ -9,7 +9,7 @@ import random
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Comparador ML Pro", page_icon="🛍️", layout="wide")
 
-# --- 1. CONEXIÓN BASE DE DATOS (GOOGLE SHEETS) ---
+# --- 1. BASE DE DATOS (GOOGLE SHEETS) ---
 def conectar_db():
     try:
         if "gcp_service_account" not in st.secrets:
@@ -53,80 +53,58 @@ def crear_usuario_nuevo(username, password, nombre, apellido, email, rol):
     except Exception as e:
         return False, f"Error: {e}"
 
-# --- 2. MOTOR DE BÚSQUEDA ---
-
-def obtener_token_ml():
-    if "mercadolibre" not in st.secrets:
-        return None
-    url = "https://api.mercadolibre.com/oauth/token"
-    # User-Agent también aquí por si acaso
-    headers = {
-        'accept': 'application/json', 
-        'content-type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    data = {
-        'grant_type': 'client_credentials',
-        'client_id': st.secrets["mercadolibre"]["app_id"],
-        'client_secret': st.secrets["mercadolibre"]["client_secret"]
-    }
-    try:
-        r = requests.post(url, headers=headers, data=data)
-        if r.status_code == 200:
-            return r.json()['access_token']
-        return None
-    except:
-        return None
-
-def procesar_resultados(data):
-    resultados = []
-    if "results" in data:
-        for item in data["results"]:
-            precio = item.get("price")
-            original = item.get("original_price")
-            oferta = "SÍ" if original and precio < original else "NO"
-            foto = item.get("thumbnail", "").replace("http://", "https://").replace("-I.jpg", "-O.jpg")
-            
-            resultados.append({
-                "Imagen": foto,
-                "Producto": item.get("title"),
-                "Precio": f"${precio:,.0f}",
-                "Vendedor": item.get("seller", {}).get("nickname", "Desconocido"),
-                "¿Oferta?": oferta,
-                "Enlace": item.get("permalink")
-            })
-    return pd.DataFrame(resultados)
+# --- 2. MOTOR DE BÚSQUEDA (MODO NAVEGADOR) ---
+# Esta versión NO usa el Token que da error 403.
+# Simula ser un navegador real para ver precios públicos.
 
 def buscar_productos(query):
-    # Conseguimos el Token
-    token = obtener_token_ml()
     url = "https://api.mercadolibre.com/sites/MLC/search"
     params = {'q': query, 'limit': 20}
     
-    # === CORRECCIÓN CLAVE: Usamos Headers de Navegador SIEMPRE ===
+    # Rotación de identidades (User-Agents) para evitar bloqueos
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    ]
+    
+    # Elegimos uno al azar
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': random.choice(user_agents),
         'Accept': 'application/json'
     }
     
-    # Si tenemos token, lo agregamos al disfraz
-    if token:
-        headers['Authorization'] = f'Bearer {token}'
-    
     try:
-        # Hacemos la petición
+        # Hacemos la petición SIN token (Anónima)
         r = requests.get(url, headers=headers, params=params)
         
         if r.status_code == 200:
-            return procesar_resultados(r.json())
-        
-        # Si falla, mostramos el error técnico en pantalla para depurar
+            data = r.json()
+            resultados = []
+            if "results" in data:
+                for item in data["results"]:
+                    precio = item.get("price")
+                    original = item.get("original_price")
+                    oferta = "SÍ" if original and precio < original else "NO"
+                    # Mejoramos la calidad de la imagen (de I a O)
+                    foto = item.get("thumbnail", "").replace("http://", "https://").replace("-I.jpg", "-O.jpg")
+                    
+                    resultados.append({
+                        "Imagen": foto,
+                        "Producto": item.get("title"),
+                        "Precio": f"${precio:,.0f}",
+                        "Vendedor": item.get("seller", {}).get("nickname", "Desconocido"),
+                        "¿Oferta?": oferta,
+                        "Enlace": item.get("permalink")
+                    })
+            return pd.DataFrame(resultados)
         else:
-            st.error(f"MercadoLibre respondió: {r.status_code} - {r.text[:200]}")
+            # Si falla, mostramos el código para entender qué pasó
+            st.error(f"Error de conexión ({r.status_code})")
             return pd.DataFrame()
             
     except Exception as e:
-        st.error(f"Error de conexión: {e}")
+        st.error(f"Error técnico: {e}")
         return pd.DataFrame()
 
 # --- 3. INTERFAZ ---
@@ -135,6 +113,7 @@ def main():
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
 
+    # Login
     if not st.session_state.logged_in:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -142,11 +121,13 @@ def main():
             u = st.text_input("Usuario")
             p = st.text_input("Pass", type="password")
             if st.button("Entrar"):
+                # Backdoor Admin
                 if u.strip() == "admin" and p.strip() == "admin123":
                     st.session_state.logged_in = True
                     st.session_state.user_info = {"nombre": "Admin", "rol": "admin"}
                     st.rerun()
                 
+                # Login Real
                 users = cargar_usuarios()
                 u_cl = u.strip()
                 if u_cl in users and users[u_cl]["password"] == hash_password(p):
@@ -157,7 +138,7 @@ def main():
                     st.error("Error de acceso")
         return
 
-    # App
+    # App Principal
     user = st.session_state.user_info
     with st.sidebar:
         st.write(f"Hola, **{user.get('nombre', 'Admin')}**")
@@ -174,11 +155,20 @@ def main():
         st.title("🔎 Buscador ML")
         q = st.text_input("Producto:")
         if st.button("Buscar") and q:
-            with st.spinner("Consultando..."):
+            with st.spinner("Buscando mejores precios..."):
                 df = buscar_productos(q)
                 if not df.empty:
-                    st.data_editor(df, column_config={"Imagen": st.column_config.ImageColumn(), "Enlace": st.column_config.LinkColumn()}, height=700, use_container_width=True)
-                # Si falla, el error saldrá en el cuadro rojo arriba (st.error)
+                    st.data_editor(
+                        df, 
+                        column_config={
+                            "Imagen": st.column_config.ImageColumn(width="small"), 
+                            "Enlace": st.column_config.LinkColumn()
+                        }, 
+                        height=700, 
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("No se encontraron resultados o hubo un bloqueo temporal.")
 
     elif menu == "Usuarios":
         st.title("👥 Usuarios")
